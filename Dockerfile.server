@@ -1,0 +1,18 @@
+# Base image
+FROM python:3.10-slim
+
+# Set working directory
+WORKDIR /app
+
+# Copy server source code and certificates directory
+COPY server.py .
+COPY certs /opt/ar-cyborg/certs/
+
+# Install dependencies
+RUN pip install --no-cache-dir cryptography
+
+# Expose the port the server listens on
+EXPOSE 2095
+
+# Default command to run the server
+CMD ["python3", "server.py"]
